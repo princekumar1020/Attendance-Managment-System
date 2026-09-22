@@ -4,6 +4,8 @@ const multer = require("multer");
 const router = express.Router();
 const teacherController = require("../controllers/teacherController");
 
+const allowedMimeTypes = ["image/jpeg", "image/png", "image/webp"];
+
 // ----------------- Multer config -----------------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -15,7 +17,19 @@ const storage = multer.diskStorage({
   },
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      return cb(null, true);
+    }
+
+    const error = new Error("Unsupported profile image type");
+    error.code = "INVALID_FILE_TYPE";
+    cb(error);
+  },
+});
 
 // ----------------- Dashboard -----------------
 router.get("/dashboard", teacherController.getDashboard);

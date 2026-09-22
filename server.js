@@ -6,6 +6,7 @@ const fs = require("fs");
 const rateLimit = require("express-rate-limit");
 const session = require("express-session");
 const flash = require("connect-flash");
+const helmet = require("helmet");
 const connectDB = require("./config/db");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -17,6 +18,8 @@ const teacherRoutes = require("./routes/teacherRoutes");
 const { isAuthenticated, isAdmin, isTeacher } = require("./middleware/auth");
 
 const app = express();
+
+app.use(helmet());
 
 
 const UPLOADS_DIR = path.join(__dirname, "public", "uploads");
@@ -98,18 +101,15 @@ app.use(express.static(path.join(__dirname, "public")));
 app.use("/uploads", express.static(path.join(__dirname, "public", "uploads")));
 
 
-connectDB();
-
-
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || "development-only-change-me",
+    secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
       maxAge: 24 * 60 * 60 * 1000, 
       httpOnly: true,
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
     },
   })
@@ -152,12 +152,28 @@ app.get("/logout", (req, res) => {
 app.use((req, res) => res.status(404).send("404 Not Found"));
 
 app.use((err, req, res, next) => {
+  if (err && (err.code === "LIMIT_FILE_SIZE" || err.code === "INVALID_FILE_TYPE")) {
+    return res.status(400).send(
+      "Invalid profile image. Please upload a JPEG, PNG, or WebP image no larger than 2 MB."
+    );
+  }
+
   console.error("Global Error:", err);
   res.status(500).send("Server Error");
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
-  console.log("Socket.IO online");
+
+async function startServer() {
+  await connectDB();
+
+  server.listen(PORT, () => {
+    console.log(`🚀 Server running at http://localhost:${PORT}`);
+    console.log("Socket.IO online");
+  });
+}
+
+startServer().catch(() => {
+  console.error("Application startup failed: MongoDB is unavailable.");
+  process.exit(1);
 });

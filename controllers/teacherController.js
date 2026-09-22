@@ -34,6 +34,18 @@ function isValidDateString(value) {
   return !Number.isNaN(date.getTime()) && date.toISOString().startsWith(value);
 }
 
+function buildAttendanceMap(records) {
+  const attendanceMap = new Map();
+
+  for (const record of records) {
+    if (!record || !record.studentId) continue;
+    const studentId = String(record.studentId._id ? record.studentId._id : record.studentId);
+    attendanceMap.set(studentId, record);
+  }
+
+  return attendanceMap;
+}
+
 async function authorizeAttendance(req, res, { className, subject }) {
   if (!req.session?.user?._id) {
     res.status(401).send("Unauthorized: Please log in.");
@@ -185,24 +197,31 @@ const getDashboard = async (req, res) => {
 
     // Auto-create ABSENT only for TODAY (never cached)
     if (selectedDate === today) {
-      for (const student of students) {
-        const exists = await Attendance.findOne({
+      const studentIds = students.map((student) => student._id);
+      const existingRecords = await Attendance.find({
+        studentId: { $in: studentIds },
+        className: selectedClass,
+        subject,
+        date: selectedDate,
+      }).select("studentId");
+
+      const existingIds = new Set(
+        existingRecords.map((record) => String(record.studentId))
+      );
+
+      const missingRecords = students
+        .filter((student) => !existingIds.has(String(student._id)))
+        .map((student) => ({
           studentId: student._id,
           className: selectedClass,
           subject,
+          teacherId: teacher._id,
           date: selectedDate,
-        });
+          status: "Absent",
+        }));
 
-        if (!exists) {
-          await Attendance.create({
-            studentId: student._id,
-            className: selectedClass,
-            subject,
-            teacherId: teacher._id,
-            date: selectedDate,
-            status: "Absent",
-          });
-        }
+      if (missingRecords.length > 0) {
+        await Attendance.insertMany(missingRecords, { ordered: false });
       }
     }
 
@@ -211,6 +230,8 @@ const getDashboard = async (req, res) => {
       subject,
       date: selectedDate,
     }).populate("studentId");
+
+    const attendanceMap = buildAttendanceMap(records);
 
     /* ---------- SAVE ONLY DATA TO REDIS ---------- */
     const cachePayload = {
@@ -233,7 +254,7 @@ const getDashboard = async (req, res) => {
       students,
       selectedClass,
       selectedDate,
-      records,
+      records: Array.from(attendanceMap.values()),
       error: null,
       success,
     });
@@ -316,7 +337,8 @@ const markAttendance = async (req, res) => {
     // ✅ REDIS CACHE INVALIDATION (CORRECT PLACE)
     const cacheKey = `teacher:dashboard:${teacher._id}:${className}:${date}`;
     await redisClient.del(cacheKey);
-    console.log("🧹 Teacher dashboard cache cleared:", cacheKey);
+    await redisClient.del("admin:dashboard");
+    console.log("🧹 Attendance-related cache keys cleared:", cacheKey, "admin:dashboard");
 
     const msg = encodeURIComponent("Attendance updated successfully.");
     return res.redirect(
@@ -367,19 +389,29 @@ const viewAttendanceRange = async (req, res) => {
       cur.setDate(cur.getDate() + 1);
     }
 
+    const studentIds = students.map((student) => student._id);
+    const attendanceRecords = await Attendance.find({
+      studentId: { $in: studentIds },
+      className: selectedClass,
+      subject,
+      date: { $gte: fromDate, $lte: toDate },
+    });
+
+    const attendanceByStudent = new Map();
+    for (const record of attendanceRecords) {
+      const studentId = String(record.studentId);
+      if (!attendanceByStudent.has(studentId)) {
+        attendanceByStudent.set(studentId, new Map());
+      }
+      attendanceByStudent.get(studentId).set(record.date, record.status);
+    }
+
     for (const student of students) {
-      const data = await Attendance.find({
-        studentId: student._id,
-        className: selectedClass,
-        subject,
-        date: { $gte: fromDate, $lte: toDate },
+      const studentAttendance = attendanceByStudent.get(String(student._id)) || new Map();
+      const filled = {};
+      dates.forEach((d) => {
+        filled[d] = studentAttendance.get(d) || "Absent";
       });
-
-      let map = {};
-      data.forEach((d) => (map[d.date] = d.status));
-
-      let filled = {};
-      dates.forEach((d) => (filled[d] = map[d] || "Absent"));
 
       records.push({ student, attendance: filled });
     }

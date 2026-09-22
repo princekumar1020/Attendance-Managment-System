@@ -625,6 +625,25 @@ const getReports = (req, res) => {
   res.render("reports", { error: null, success: null });
 };
 
+function buildStudentAttendanceMap(records) {
+  const map = new Map();
+
+  for (const record of records) {
+    if (!record || !record.studentId) continue;
+    const studentId = String(record.studentId);
+    if (!map.has(studentId)) {
+      map.set(studentId, {});
+    }
+
+    const statusMap = map.get(studentId);
+    if (!statusMap[record.date] || (statusMap[record.date] === "Absent" && record.status === "Present")) {
+      statusMap[record.date] = record.status;
+    }
+  }
+
+  return map;
+}
+
 /**
  * 🎯 Student-wise Report (calendar + all-subject view)
  * req.body: rollNo, className, fromDate, toDate, [subject]
@@ -757,28 +776,30 @@ const dateReport = async (req, res) => {
     }
 
     const students = await Student.find(studentFilter);
-    let records = [];
+    const studentIds = students.map((student) => student._id);
+    let query = { studentId: { $in: studentIds }, date };
+    if (subjectTrim) {
+      query.subject = subjectTrim;
+    }
 
-    for (let i = 0; i < students.length; i++) {
-      const student = students[i];
+    const recs = await Attendance.find(query);
+    const attendanceByStudent = new Map();
 
-      let query = { studentId: student._id, date };
-      if (subjectTrim) {
-        query.subject = subjectTrim;
+    for (const record of recs) {
+      const studentId = String(record.studentId);
+      if (!attendanceByStudent.has(studentId)) {
+        attendanceByStudent.set(studentId, "Absent");
       }
 
-      const recs = await Attendance.find(query);
-
-      let finalStatus = "Absent";
-      recs.forEach((r) => {
-        if (r.status === "Present") finalStatus = "Present";
-      });
-
-      records.push({
-        student,
-        attendance: { [date]: finalStatus },
-      });
+      if (record.status === "Present") {
+        attendanceByStudent.set(studentId, "Present");
+      }
     }
+
+    const records = students.map((student) => ({
+      student,
+      attendance: { [date]: attendanceByStudent.get(String(student._id)) || "Absent" },
+    }));
 
     let typeLabel = `Date Report (${date}`;
     if (classNameUpper) typeLabel += `, Class: ${classNameUpper}`;
@@ -878,43 +899,30 @@ const classSubjectsReport = async (req, res) => {
     }
 
     const subjectReports = [];
+    const studentIds = students.map((student) => student._id);
+    const allSubjectRecords = await Attendance.find({
+      studentId: { $in: studentIds },
+      className: classNameUpper,
+      subject: { $in: subjectKeys },
+      date: { $gte: fromDate, $lte: toDate },
+    });
 
     for (let s = 0; s < subjectKeys.length; s++) {
       const subjectName = subjectKeys[s];
       const meta = subjectMap[subjectName];
+      const filteredRecords = allSubjectRecords.filter((record) => record.subject === subjectName);
+      const subjectAttendanceMap = buildStudentAttendanceMap(filteredRecords);
 
-      let records = [];
+      const records = students.map((student) => {
+        const statusMap = subjectAttendanceMap.get(String(student._id)) || {};
+        const filledAttendance = {};
 
-      for (let i = 0; i < students.length; i++) {
-        const student = students[i];
-
-        const studentRecords = await Attendance.find({
-          studentId: student._id,
-          className: classNameUpper,
-          subject: subjectName,
-          date: { $gte: fromDate, $lte: toDate },
-        });
-
-        let dateMap = {};
-        studentRecords.forEach((r) => {
-          const d = r.date;
-          const st = r.status;
-          if (!dateMap[d]) {
-            dateMap[d] = st;
-          } else {
-            if (dateMap[d] === "Absent" && st === "Present") {
-              dateMap[d] = "Present";
-            }
-          }
-        });
-
-        let filledAttendance = {};
         dates.forEach((d) => {
-          filledAttendance[d] = dateMap[d] || "Absent";
+          filledAttendance[d] = statusMap[d] || "Absent";
         });
 
-        records.push({ student, attendance: filledAttendance });
-      }
+        return { student, attendance: filledAttendance };
+      });
 
       subjectReports.push({
         subject: subjectName,
